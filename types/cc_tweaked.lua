@@ -1,0 +1,44 @@
+---@meta
+--- CC: Tweaked Native Peripheral & Extended API Type Definitions
+--- ComputerCraft: Tweaked operating system and standard peripheral interfaces.
+
+---@class os
+---@field sleep fun(time: number) Pauses current coroutine execution for specified seconds (resolution ~0.05s / 1 tick).
+---@field epoch fun(type?: "utc"|"local"|"ingame"): number Returns epoch timestamp in milliseconds for UTC time, local host time, or in-game Minecraft ticks.
+---@field startTimer fun(timeout: number): number Starts an asynchronous countdown timer for specified seconds and returns unique timer ID.
+---@field cancelTimer fun(token: number) Cancels active countdown timer by its numeric timer ID.
+---@field pullEvent fun(target?: string): string, any, any, any, any Suspends execution and yields until an event matching target filter (or any event) is received.
+---@field pullEventRaw fun(target?: string): string, any, any, any, any Suspends execution like pullEvent, but does not terminate on terminate event (Ctrl+T).
+---@field queueEvent fun(name: string, ...: any) Pushes a custom event and optional parameters into ComputerCraft event queue.
+---@field clock fun(): number Returns CPU execution time in seconds.
+---@field time fun(locale?: "ingame"|"utc"|"local"): number Returns current in-game or real-world time as a fractional hour number (0.0 to 24.0).
+---@field date fun(format?: string, time?: number): string|table Returns formatted date/time string or table according to strftime format.
+---@field getComputerID fun(): number Returns unique hardware ID integer of the computer.
+---@field getComputerLabel fun(): string|nil Returns custom text label assigned to the computer, or nil if unlabeled.
+---@field setComputerLabel fun(label?: string) Sets or clears custom text label of the computer.
+
+---@class CCMonitor
+---@field write fun(text: string) Writes text string at current cursor position on the monitor.
+---@field clear fun() Clears entire monitor screen and fills it with current background color.
+---@field clearLine fun() Clears current line and fills it with background color.
+---@field getCursorPos fun(): number, number Returns current (x, y) character coordinates of cursor.
+---@field setCursorPos fun(x: number, y: number) Moves cursor to specified (x, y) 1-based character position.
+---@field setCursorBlink fun(blink: boolean) Enables or disables blinking underscore cursor.
+---@field isColor fun(): boolean Returns true if monitor supports Advanced ComputerCraft 16-color palette.
+---@field getSize fun(): number, number Returns character grid dimensions (width, height) in columns and rows.
+---@field scroll fun(n: number) Scrolls monitor content vertically by n lines.
+---@field setTextColor fun(color: number) Sets active text foreground color bitmask (e.g. colors.white, colors.yellow).
+---@field setTextColour fun(colour: number) British English alias for setTextColor.
+---@field setBackgroundColor fun(color: number) Sets active background color bitmask.
+---@field setBackgroundColour fun(colour: number) British English alias for setBackgroundColor.
+---@field setTextScale fun(scale: number) Sets monitor character scaling factor (0.5 to 5.0, in increments of 0.5).
+---@field getTextScale fun(): number Returns current monitor character scale.
+
+---@class CCInventory
+---@field size fun(): number Returns total number of storage slots in container.
+---@field list fun(): table<number, {name: string, count: number, damage?: number}> Returns table listing non-empty item slots and basic item descriptors.
+---@field getItemDetail fun(slot: number): table|nil Returns detailed item metadata table for item at specified slot, or nil if empty.
+---@field getItemLimit fun(slot: number): number Returns maximum stack size limit for specified slot.
+---@field pushItems fun(toName: string, fromSlot: number, limit?: number, toSlot?: number): number Pushes items from this container to target container. Returns number of items transferred.
+---@field pullItems fun(fromName: string, fromSlot: number, limit?: number, toSlot?: number): number Pulls items into this container from source container. Returns number of items transferred.
+

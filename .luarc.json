@@ -1,0 +1,67 @@
+{
+	"$schema": "https://raw.githubusercontent.com/sumneko/vscode-lua/master/setting/schema.json",
+	"runtime": {
+		"version": "Lua 5.2"
+	},
+	"diagnostics": {
+		"enable": true,
+		"globals": [
+			"term",
+			"fs",
+			"textutils",
+			"colors",
+			"colours",
+			"peripheral",
+			"redstone",
+			"rs",
+			"os",
+			"sleep",
+			"read",
+			"write",
+			"print",
+			"keys",
+			"paintutils",
+			"window",
+			"vector",
+			"parallel",
+			"settings",
+			"bit32",
+			"bit",
+			"http",
+			"shell",
+			"gps"
+		],
+		"disable": [
+			"undefined-field"
+		],
+		"neededFileStatus": {
+			"unused-local": "Any",
+			"unused-function": "Any",
+			"unused-vararg": "Any",
+			"param-type-mismatch": "Any",
+			"assign-type-mismatch": "Any",
+			"return-type-mismatch": "Any",
+			"redundant-parameter": "Any",
+			"redundant-value": "Any",
+			"missing-parameter": "Any"
+		},
+		"severity": {
+			"unused-local": "Warning",
+			"unused-function": "Warning",
+			"unused-vararg": "Warning",
+			"redundant-parameter": "Warning",
+			"redundant-value": "Warning"
+		}
+	},
+	"type": {
+		"castNumberToInteger": true,
+		"weakUnionCheck": true
+	},
+	"workspace": {
+		"checkThirdParty": false,
+		"ignoreDir": [
+			".git",
+			".agents"
+		]
+	}
+}
