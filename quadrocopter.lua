@@ -19,11 +19,11 @@ local CONFIG = {
 		MAX_CRUISE_ALT = 320.0,
 		MAX_CLIMB_SPEED = 3.5,
 		MAX_DESCENT_SPEED = 1.5,
-		APPROACH_MIN_DISTANCE = 65.0,
-		APPROACH_MAX_TILT = 4.0,
-		APPROACH_TERMINAL_TILT = 1.5,
-		APPROACH_THROTTLE_CAP = 0.22,
-		BRAKE_ACCEL = 0.80,
+		APPROACH_MIN_DISTANCE = 45.0,
+		APPROACH_MAX_TILT = 2.5,
+		APPROACH_TERMINAL_TILT = 1.0,
+		APPROACH_THROTTLE_CAP = 0.15,
+		BRAKE_ACCEL = 0.50,
 		NOMINAL_HOVER = 0.025,
 		HOVER_RADIUS = 5.0,
 		ALT_DEADBAND = 0.5,
@@ -43,7 +43,7 @@ local CONFIG = {
 	},
 
 	PID = {
-		VERTICAL = { kp = 0.045, ki = 0.008, kd = 0.020, max_i = 0.030, max_out = 0.080 },
+		VERTICAL = { kp = 0.040, ki = 0.006, kd = 0.035, max_i = 0.025, max_out = 0.060 },
 		VELOCITY = { kp = 1.6, ki = 0.02, kd = 0.40, max_i = 1.5, max_out = 12.0 },
 		HEADING  = { kp = 0.30, ki = 0.01, kd = 0.18, max_i = 2.0, max_out = 5.0 },
 		LEVELING = { kp = 0.50, ki = 0.0, kd = 0.25, max_i = 0.0, max_out = 6.0 }
@@ -485,7 +485,7 @@ function FlightLogger.update(dt, targetVerticalSpeed)
 	local line = string.format(
 		"[%s] ST:%-7s | Y:%6.1f->%5.0f(err:%+5.1f) | Vy:%+5.2f/%+4.1f | Thr:%.3f(act:%.3f,[%s]) | Vxz:%4.2f(X:%+5.2f,Z:%+5.2f) | Att(P:%+4.1f*,R:%+4.1f*) | Vec:%4.1f*(%+5.2f,%+4.2f,%+5.2f) | Dist:%s",
 		nowStr,
-		tostring((FlightManager and FlightManager.state) or "IDLE"),
+		tostring((FlightManager and FlightManager.state) or "PARKED"),
 		y,
 		targetY,
 		errY,
@@ -1687,24 +1687,7 @@ function JoystickNav.dispatch(targetX, targetZ)
 	NavSystem.setManualCoordinates(targetX, targetZ)
 	NavSystem.update()
 
-	local distanceHoriz = NavSystem.target_dHoriz or 0
-	local horizontalSpeed = math.sqrt((NavSystem.vel.x or 0)^2 + (NavSystem.vel.z or 0)^2)
-	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
-
-	if FlightManager.state == "IDLE" then
-		FlightManager.state = "HOVER"
-		FlightManager.is_grounded = false
-		FlightManager.is_airborne = false
-		FlightManager.liftoff_start_y = NavSystem.pos.y
-		FlightManager.touchdown_timer = 0.0
-		FlightManager.status_msg = string.format("Liftoff -> Target X:%.0f Z:%.0f", targetX, targetZ)
-	elseif FlightManager.state == "MANUAL" or FlightManager.state == "HOVER" then
-		FlightManager.state = (distanceHoriz <= brakingDistance) and "APPROACH" or "CRUISE"
-		FlightManager.status_msg = string.format("Flying -> Target X:%.0f Z:%.0f", targetX, targetZ)
-	else
-		FlightManager.state = (distanceHoriz <= brakingDistance) and "APPROACH" or "CRUISE"
-		FlightManager.status_msg = string.format("Retargeted -> X:%.0f Z:%.0f", targetX, targetZ)
-	end
+	FlightManager.planToTarget()
 end
 
 function JoystickNav.update(dt, deltaForward, deltaRight, buttonPressed)
@@ -1971,6 +1954,7 @@ function NavSystem.clearTarget()
 	NavSystem.manual_coord = nil
 	NavSystem.is_target_loaded = false
 	NavSystem.target_source = "NONE"
+	NavSystem.locked_target_key = nil
 	if FlightManager then
 		FlightManager.waypoint_reached = false
 	end
@@ -1992,26 +1976,35 @@ end
 
 function NavSystem.getTargetKey()
 	if Hardware.nav_target and Hardware.nav_target.hasTarget and Hardware.nav_target.hasTarget() then
+		if NavSystem.locked_target_key then
+			return NavSystem.locked_target_key
+		end
 		local okMeta, meta = pcall(Hardware.nav_target.getTargetMetadata)
+		local key = nil
 		if okMeta and type(meta) == "table" then
-			if meta.sublevel_id then return "lodestone_" .. tostring(meta.sublevel_id) end
-			if meta.map_id then return "map_" .. tostring(meta.map_id) end
-			if meta.placer_uuid then return "recovery_" .. tostring(meta.placer_uuid) end
-			if meta.name and meta.name ~= "" then return "named_" .. tostring(meta.name) end
-			if meta.title and meta.title ~= "" then return "titled_" .. tostring(meta.title) end
+			if meta.sublevel_id then key = "lodestone_" .. tostring(meta.sublevel_id)
+			elseif meta.map_id then key = "map_" .. tostring(meta.map_id)
+			elseif meta.placer_uuid then key = "recovery_" .. tostring(meta.placer_uuid)
+			elseif meta.name and meta.name ~= "" then key = "named_" .. tostring(meta.name)
+			elseif meta.title and meta.title ~= "" then key = "titled_" .. tostring(meta.title)
+			end
 		end
-		if NavSystem.target_world_x and NavSystem.target_world_z then
-			local qx = MathUtil.round(NavSystem.target_world_x / 8.0, 0) * 8
-			local qz = MathUtil.round(NavSystem.target_world_z / 8.0, 0) * 8
-			return string.format("target_pos_%.0f_%.0f", qx, qz)
+		if not key then
+			if NavSystem.target_world_x and NavSystem.target_world_z then
+				key = string.format("target_pos_%.0f_%.0f", MathUtil.round(NavSystem.target_world_x, 0), MathUtil.round(NavSystem.target_world_z, 0))
+			else
+				key = "compass_target"
+			end
 		end
-		local okType, targetType = pcall(Hardware.nav_target.getTargetType)
-		local targetY = (NavSystem.pos.y and NavSystem.target_dY) and MathUtil.round((NavSystem.pos.y + NavSystem.target_dY) / 5.0, 0) * 5 or 0
-		return string.format("target_%s_Y%d", tostring((okType and targetType) or "compass"), targetY)
+		NavSystem.locked_target_key = key
+		return key
 	elseif NavSystem.manual_coord then
+		NavSystem.locked_target_key = nil
 		return string.format("manual_%.0f_%.0f", NavSystem.manual_coord.x, NavSystem.manual_coord.z)
+	else
+		NavSystem.locked_target_key = nil
+		return nil
 	end
-	return nil
 end
 
 function NavSystem.getTargetPadAltitude()
@@ -2027,7 +2020,7 @@ function NavSystem.getTargetPadAltitude()
 end
 
 FlightManager = {
-	state = "IDLE",
+	state = "PARKED",
 	is_airborne = false,
 	liftoff_start_y = nil,
 	pid_vel_x = PID.new(CONFIG.PID.VELOCITY),
@@ -2116,8 +2109,7 @@ function FlightManager.reset(isInitialBoot)
 			local estHover = FlightManager.getEstimatedHover(NavSystem.pressure)
 			FlightManager.hover_throttle = estHover
 			Hardware.applyThrottle(estHover, CONFIG.TICK_RATE, true)
-			FlightManager.state = "HOVER"
-			FlightManager.status_msg = string.format("Stabilized in HOVER (Y:%.1f, EstHover:%.1f%%). In-flight boot.", currentY, estHover * 100)
+			FlightManager.planToTarget()
 
 		elseif (not isLandingMode) and (altFloorSetting > (currentY + 2.5) or isHoverMode) then
 			FlightManager.is_grounded = false
@@ -2125,20 +2117,20 @@ function FlightManager.reset(isInitialBoot)
 			FlightManager.liftoff_start_y = currentY
 			FlightManager.touchdown_timer = 0.0
 			FlightManager.hover_stable_timer = 0.0
-			FlightManager.state = "HOVER"
-			FlightManager.status_msg = isHoverMode and "Hover switch ON: Boot takeoff initialized." or string.format("Altitude lever (%.0fm > %.0fm): Boot takeoff initialized.", altFloorSetting, currentY)
+			FlightManager.planToTarget()
 
 		else
 			FlightManager.is_grounded = true
 			FlightManager.is_airborne = false
 			FlightManager.liftoff_start_y = currentY
-			FlightManager.state = "IDLE"
+			FlightManager.state = "PARKED"
 			FlightManager.status_msg = string.format("PARKED on base (Y:%.1f, Tilt:%.1f*). Ready for departure.", currentY, tiltMagnitude)
 			Hardware.applyThrottle(0, CONFIG.TICK_RATE, true)
 		end
 	else
 		FlightManager.is_grounded = false
 		Hardware.applyThrottle(0, CONFIG.TICK_RATE, true)
+		FlightManager.planToTarget()
 	end
 end
 
@@ -2151,12 +2143,106 @@ function FlightManager.isStationary(threshold)
 	return totalSpeed <= maxSpeedThreshold and math.abs(velocityX) <= maxSpeedThreshold and math.abs(velocityY) <= maxSpeedThreshold and math.abs(velocityZ) <= maxSpeedThreshold
 end
 
+function FlightManager.planToTarget()
+	local currentY = NavSystem.pos.y or 0
+	local targetDistance = NavSystem.target_dHoriz or 0
+	local altFloorSetting, isLandingMode, isHoverMode = Hardware.readLevers()
+	local effectiveTargetAlt = FlightManager.override_hover_alt or altFloorSetting
+	local altitudeDeficit = effectiveTargetAlt - currentY
+
+	if isHoverMode then
+		FlightManager.state = "FREEZED"
+		FlightManager.target_alt = currentY
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = "Hover switch active. Holding position in FREEZED."
+		return
+	end
+
+	if not FlightManager.is_airborne or FlightManager.is_grounded then
+		if isLandingMode then
+			FlightManager.state = "PARKED"
+			FlightManager.is_grounded = true
+			FlightManager.is_airborne = false
+			Hardware.applyThrottle(0, CONFIG.TICK_RATE, true)
+			Hardware.clearVector()
+			Hardware.setGyroStiffness(0, 0)
+			FlightManager.status_msg = string.format("PARKED on ground (Y:%.1f). Flip landing switch OFF to launch.", currentY)
+			return
+		end
+
+		FlightManager.state = "CLIMB"
+		FlightManager.is_airborne = false
+		FlightManager.is_grounded = false
+		FlightManager.liftoff_start_y = currentY
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = string.format("TAKEOFF & CLIMB to altitude (Y:%.1f -> %.0fm). Pure vertical ascent.", currentY, effectiveTargetAlt)
+		return
+	end
+
+	if not NavSystem.is_target_loaded then
+		FlightManager.state = "HOVER"
+		FlightManager.target_alt = effectiveTargetAlt
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = "No target loaded. Holding altitude in HOVER."
+		return
+	end
+
+	local hoverRadius = CONFIG.LIMITS.HOVER_RADIUS or 5.0
+	if targetDistance <= hoverRadius then
+		if isLandingMode and not FlightManager.landing_aborted then
+			FlightManager.state = "LANDING"
+			FlightManager.touchdown_timer = 0.0
+			FlightManager.landing_time_in_state = 0.0
+			FlightManager.landing_start_y = currentY
+			FlightManager.landing_has_descended = false
+			FlightManager.landing_retry_count = 0
+			FlightManager.status_msg = "Arrived at target: Commencing descent to land."
+		else
+			FlightManager.state = "HOVER"
+			FlightManager.target_alt = effectiveTargetAlt
+			Hardware.clearVector()
+			Hardware.setGyroStiffness(15, 15)
+			FlightManager.status_msg = "Target reached. Holding position in HOVER."
+		end
+		return
+	end
+
+	local altDeadband = CONFIG.LIMITS.ALT_DEADBAND or 0.5
+	if altitudeDeficit > altDeadband then
+		FlightManager.state = "CLIMB"
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = string.format("CLIMB to target altitude (Y:%.1f -> %.0fm). Pure vertical ascent.", currentY, effectiveTargetAlt)
+		return
+	end
+
+	local currentVx = NavSystem.vel.x or 0
+	local currentVz = NavSystem.vel.z or 0
+	local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
+	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+
+	if targetDistance <= brakingDistance then
+		FlightManager.state = "APPROACH"
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.pid_vel_x:reset()
+		FlightManager.pid_vel_z:reset()
+		FlightManager.status_msg = string.format("Target nearby (Dist:%.1fm <= SBrake:%.1fm). Entering APPROACH.", targetDistance, brakingDistance)
+		return
+	end
+
+	FlightManager.state = "CRUISE"
+	FlightManager.status_msg = string.format("Altitude reached (Y:%.1f). Cruising to target (Dist:%.1fm).", currentY, targetDistance)
+end
+
 function FlightManager.processTouchdown(dt, isGrounded, restingTilt, targetKey, targetDistance)
 	if isGrounded then
 		FlightManager.touchdown_timer = (FlightManager.touchdown_timer or 0) + dt
 		local requiredTimeout = CONFIG.LIMITS.TOUCHDOWN_TIMEOUT or 1.5
 		if FlightManager.touchdown_timer >= requiredTimeout then
-			FlightManager.state = "IDLE"
+			FlightManager.state = "PARKED"
 			FlightManager.is_grounded = true
 			FlightManager.is_airborne = false
 			FlightManager.touchdown_timer = 0.0
@@ -2180,7 +2266,6 @@ function FlightManager.computeThrottle(targetVerticalSpeed, dt, normalY, isTakeo
 	dt = dt or CONFIG.TICK_RATE
 	local currentVy = NavSystem.vel.y or 0
 	local currentPressure = NavSystem.pressure or 1.0
-	local estHover = FlightManager.getEstimatedHover(currentPressure)
 
 	local rawAcceleration = (currentVy - (FlightManager.last_vy or currentVy)) / math.max(0.01, dt)
 	FlightManager.last_vy = currentVy
@@ -2189,16 +2274,23 @@ function FlightManager.computeThrottle(targetVerticalSpeed, dt, normalY, isTakeo
 
 	local errorVerticalSpeed = targetVerticalSpeed - currentVy
 
-	if FlightManager.state ~= "IDLE" and not FlightManager.is_grounded and FlightManager.state ~= "LANDING" then
-		if math.abs(errorVerticalSpeed) < 0.5 and math.abs(currentVy) < 0.3 and math.abs(targetVerticalSpeed) < 0.2 then
+	local baseHoverConstant = CONFIG.LIMITS.NOMINAL_HOVER or 0.025
+	local pressureScale = MathUtil.clamp(1.0 / math.max(0.15, currentPressure), 1.0, 5.0)
+	local learnedBias = 1.0
+	if FlightManager.hover_throttle and FlightManager.hover_throttle > 0 then
+		learnedBias = MathUtil.clamp(FlightManager.hover_throttle / baseHoverConstant, 0.75, 1.6)
+	end
+	local nominalHover = baseHoverConstant * pressureScale * learnedBias
+
+	if FlightManager.state ~= "PARKED" and not FlightManager.is_grounded and FlightManager.state ~= "LANDING" then
+		if math.abs(errorVerticalSpeed) < 0.4 and math.abs(currentVy) < 0.25 and math.abs(targetVerticalSpeed) < 0.2 then
 			FlightManager.hover_throttle = MathUtil.clamp(
-				(FlightManager.hover_throttle or estHover) + errorVerticalSpeed * 0.010 * dt,
-				estHover * 0.65,
-				estHover * 1.45
+				(FlightManager.hover_throttle or baseHoverConstant) + errorVerticalSpeed * 0.005 * dt,
+				baseHoverConstant * 0.70,
+				baseHoverConstant * 1.60
 			)
 		end
 	end
-	local nominalHover = FlightManager.hover_throttle or estHover
 
 	if targetVerticalSpeed < -0.1 and not isTakeoff then
 		if FlightManager.pid_vertical.integral > 0.005 then
@@ -2207,12 +2299,12 @@ function FlightManager.computeThrottle(targetVerticalSpeed, dt, normalY, isTakeo
 	end
 
 	local maxAllowedCeiling = Hardware.throttle_ceiling or CONFIG.LIMITS.MAX_THROTTLE
-	local isClimbing = (targetVerticalSpeed > 0.2) or isTakeoff
+	local isClimbingState = isTakeoff or (FlightManager.state == "CLIMB")
 
 	local pidCorrection = FlightManager.pid_vertical:compute(errorVerticalSpeed, dt, accelerationVerticalSpeed)
 	local effectiveCorrection = pidCorrection
-	if isClimbing and errorVerticalSpeed > 0 then
-		local climbBoost = errorVerticalSpeed * 0.05
+	if isClimbingState and errorVerticalSpeed > 0 then
+		local climbBoost = math.min(0.080, errorVerticalSpeed * 0.030)
 		effectiveCorrection = math.max(effectiveCorrection, climbBoost)
 	end
 	local baseThrottle = nominalHover + effectiveCorrection
@@ -2221,86 +2313,58 @@ function FlightManager.computeThrottle(targetVerticalSpeed, dt, normalY, isTakeo
 	local finalThrottle = baseThrottle / normalY
 
 	local minThrottle = CONFIG.LIMITS.MIN_THROTTLE or 0.0
-	if FlightManager.state ~= "LANDING" and FlightManager.state ~= "IDLE" and not FlightManager.is_grounded then
-		minThrottle = MathUtil.clamp(nominalHover * 0.50, CONFIG.LIMITS.MIN_AIRBORNE_THROTTLE or 0.015, 0.080)
+	if FlightManager.state ~= "LANDING" and FlightManager.state ~= "PARKED" and not FlightManager.is_grounded then
+		minThrottle = MathUtil.clamp(nominalHover * 0.60, CONFIG.LIMITS.MIN_AIRBORNE_THROTTLE or 0.015, 0.120)
 	end
 
-	local dynamicCeiling = isClimbing and maxAllowedCeiling or MathUtil.clamp(nominalHover * 2.50, 0.080, maxAllowedCeiling)
+	local dynamicCeiling = isClimbingState and math.min(nominalHover * 2.5, maxAllowedCeiling) or MathUtil.clamp(nominalHover * 1.80, 0.080, maxAllowedCeiling)
 	local effectiveCeiling = customCeiling and math.min(customCeiling, dynamicCeiling) or dynamicCeiling
 
 	finalThrottle = MathUtil.clamp(finalThrottle, minThrottle, effectiveCeiling)
 	return finalThrottle, currentVy
 end
 
-function FlightManager.updateIdle(dt, effectiveTargetAlt, isLandingMode, isHoverMode, targetJustChanged)
+function FlightManager.updateParked(dt, effectiveTargetAlt, isLandingMode, isHoverMode, targetJustChanged)
 	local currentVy = NavSystem.vel.y or 0
+	local currentVx = NavSystem.vel.x or 0
+	local currentVz = NavSystem.vel.z or 0
+	local linearSpeed = math.sqrt(currentVx * currentVx + currentVy * currentVy + currentVz * currentVz)
 	local currentPitch = NavSystem.attitude.pitch or 0
 	local currentRoll = NavSystem.attitude.roll or 0
 	local idleTilt = math.max(math.abs(currentPitch), math.abs(currentRoll))
 	local maxIdleTilt = CONFIG.LIMITS.MAX_IDLE_TILT or 10.0
 
-	if currentVy < -0.15 or idleTilt > maxIdleTilt then
-		FlightManager.state = "HOVER"
+	if currentVy < -0.15 or linearSpeed > 0.40 or idleTilt > maxIdleTilt then
+		FlightManager.state = "CLIMB"
 		FlightManager.is_grounded = false
 		FlightManager.is_airborne = true
-		FlightManager.override_hover_alt = NavSystem.pos.y + 2.5
+		FlightManager.override_hover_alt = math.max(NavSystem.pos.y + 15.0, effectiveTargetAlt or 0)
 		FlightManager.touchdown_timer = 0.0
+		Hardware.setGyroStiffness(15, 15)
 		local recoveryThrottle = math.min(Hardware.throttle_ceiling or CONFIG.LIMITS.MAX_THROTTLE, 0.35)
 		Hardware.applyThrottle(recoveryThrottle, dt, true)
-		if currentVy < -0.15 then
-			FlightManager.status_msg = string.format("FALL DETECTED (Vy:%.2f m/s): Cancelled IDLE -> Engaging HOVER.", currentVy)
+		if currentVy < -0.15 or linearSpeed > 0.40 then
+			FlightManager.status_msg = string.format("FALL DETECTED IN PARK (Vy:%.2f m/s, Spd:%.2f m/s): Emergency CLIMB!", currentVy, linearSpeed)
 		else
-			FlightManager.status_msg = string.format("STEEP TILT (%.1f* > %.1f*): Cancelled IDLE -> Engaging HOVER.", idleTilt, maxIdleTilt)
+			FlightManager.status_msg = string.format("STEEP TILT (%.1f* > %.1f*): Emergency CLIMB from PARKED!", idleTilt, maxIdleTilt)
 		end
 		return
 	end
 
-	local targetDistance = NavSystem.target_dHoriz or 0
-	local isFarTargetLoaded = NavSystem.is_target_loaded and (targetDistance > (CONFIG.LIMITS.HOVER_RADIUS or 3.5))
-
 	local wasLandingMode = (FlightManager.last_landing_mode ~= nil) and FlightManager.last_landing_mode or isLandingMode
-	local wasHoverMode = (FlightManager.last_hover_mode ~= nil) and FlightManager.last_hover_mode or isHoverMode
 	local landingJustReleased = wasLandingMode and (not isLandingMode)
-	local hoverJustEngaged = (not wasHoverMode) and isHoverMode
 	FlightManager.last_landing_mode = isLandingMode
 	FlightManager.last_hover_mode = isHoverMode
 
-	local wantsTakeoff = (not isLandingMode) and (
-		landingJustReleased
-		or targetJustChanged
-		or (effectiveTargetAlt > (NavSystem.pos.y + 2.5))
-		or (isFarTargetLoaded and (effectiveTargetAlt > (NavSystem.pos.y + 1.5) or not isLandingMode))
-		or (isHoverMode and effectiveTargetAlt > (NavSystem.pos.y + 1.5))
-		or hoverJustEngaged
-	)
-
-	if wantsTakeoff then
-		if effectiveTargetAlt <= (NavSystem.pos.y + 2.5) then
-			effectiveTargetAlt = NavSystem.pos.y + 5.0
-			FlightManager.override_hover_alt = effectiveTargetAlt
-		else
-			FlightManager.override_hover_alt = nil
-		end
+	if landingJustReleased or (not isLandingMode and targetJustChanged) then
 		FlightManager.landing_aborted = false
-		FlightManager.state = "HOVER"
 		FlightManager.is_grounded = false
 		FlightManager.is_airborne = false
 		FlightManager.liftoff_start_y = NavSystem.pos.y
 		FlightManager.touchdown_timer = 0.0
 		FlightManager.hover_stable_timer = 0.0
 		FlightManager.pid_vertical:reset()
-
-		local triggerMessage = "Takeoff"
-		if landingJustReleased then
-			triggerMessage = "Landing switch OFF: Takeoff initialized"
-		elseif targetJustChanged or isFarTargetLoaded then
-			triggerMessage = string.format("Target loaded (%s)", NavSystem.target_source)
-		elseif isHoverMode or hoverJustEngaged then
-			triggerMessage = "Hover switch ON: Takeoff initialized"
-		else
-			triggerMessage = string.format("Altitude lever (%.0fm > %.0fm): Takeoff initialized", effectiveTargetAlt, NavSystem.pos.y)
-		end
-		FlightManager.status_msg = string.format("%s (Climbing to %.0fm).", triggerMessage, effectiveTargetAlt)
+		FlightManager.planToTarget()
 		return
 	end
 
@@ -2319,27 +2383,158 @@ function FlightManager.updateIdle(dt, effectiveTargetAlt, isLandingMode, isHover
 	end
 end
 
+function FlightManager.updateClimb(dt, effectiveTargetAlt, cruiseTargetVerticalSpeed, isLandingMode, isHoverMode)
+	if isHoverMode then
+		FlightManager.state = "FREEZED"
+		FlightManager.target_alt = NavSystem.pos.y
+		FlightManager.pid_vel_x:reset()
+		FlightManager.pid_vel_z:reset()
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = "Hover switch ON: Freezing climb at current altitude."
+		return
+	end
+
+	local currentY = NavSystem.pos.y or 0
+	local startY = FlightManager.liftoff_start_y or currentY
+
+	if isLandingMode then
+		FlightManager.state = "LANDING"
+		FlightManager.landing_start_y = currentY
+		FlightManager.touchdown_timer = 0.0
+		FlightManager.landing_time_in_state = 0.0
+		FlightManager.landing_has_descended = false
+		FlightManager.status_msg = "Landing switch ON: Aborting climb to land."
+		return
+	end
+
+	Hardware.clearVector()
+	Hardware.setGyroStiffness(15, 15)
+
+	if currentY >= (startY + 1.2) then
+		FlightManager.is_airborne = true
+		FlightManager.is_grounded = false
+	end
+
+	local computedThrottle, currentVy = FlightManager.computeThrottle(cruiseTargetVerticalSpeed, dt, 1.0, true)
+	Hardware.applyThrottle(computedThrottle, dt, true)
+
+	local deadband = CONFIG.LIMITS.ALT_DEADBAND or 0.5
+	if currentY >= (effectiveTargetAlt - deadband) and math.abs(currentVy) < 1.0 then
+		local targetDistance = NavSystem.target_dHoriz or 0
+		local currentVx = NavSystem.vel.x or 0
+		local currentVz = NavSystem.vel.z or 0
+		local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
+		local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+
+		if not NavSystem.is_target_loaded then
+			FlightManager.state = "HOVER"
+			FlightManager.status_msg = string.format("Target altitude reached (Y:%.1f). Holding HOVER.", currentY)
+		elseif targetDistance <= brakingDistance then
+			FlightManager.state = "APPROACH"
+			FlightManager.pid_vel_x:reset()
+			FlightManager.pid_vel_z:reset()
+			FlightManager.status_msg = string.format("Target altitude reached (Y:%.1f). Entering APPROACH (Dist:%.1fm).", currentY, targetDistance)
+		else
+			FlightManager.state = "CRUISE"
+			FlightManager.status_msg = string.format("Target altitude reached (Y:%.1f). Transitioning to CRUISE.", currentY)
+		end
+		return
+	end
+
+	FlightManager.status_msg = string.format("CLIMB TO CRUISE: Y=%.1f/%.0fm (+%.1fm) Vy=%.1f m/s", currentY, effectiveTargetAlt, effectiveTargetAlt - currentY, currentVy)
+end
+
+function FlightManager.updateFreezed(dt, isHoverMode)
+	if not isHoverMode then
+		FlightManager.status_msg = "Hover switch released: Resuming target planning."
+		FlightManager.planToTarget()
+		return
+	end
+
+	local currentVx = NavSystem.vel.x or 0
+	local currentVz = NavSystem.vel.z or 0
+	local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
+
+	if horizontalSpeed > 0.05 then
+		local brakeTiltX = MathUtil.clamp(-currentVx * 2.0, -1.5, 1.5)
+		local brakeTiltZ = MathUtil.clamp(-currentVz * 2.0, -1.5, 1.5)
+		Hardware.setTiltVector(brakeTiltX, brakeTiltZ, 1.5, dt)
+	else
+		Hardware.clearVector()
+	end
+	Hardware.setGyroStiffness(15, 15)
+
+	local currentY = NavSystem.pos.y or 0
+	local targetAlt = FlightManager.target_alt or currentY
+	local errorAltitude = targetAlt - currentY
+
+	local targetVy = 0.0
+	local deadband = CONFIG.LIMITS.ALT_DEADBAND or 0.5
+	if math.abs(errorAltitude) > deadband then
+		targetVy = MathUtil.clamp(errorAltitude * 0.8, -1.0, 1.0)
+	end
+
+	local computedThrottle = FlightManager.computeThrottle(targetVy, dt, 1.0, false)
+	Hardware.applyThrottle(computedThrottle, dt, false)
+
+	FlightManager.status_msg = string.format("FREEZED (Y:%.1f, Alt:%.0fm, Drift:%.2fm/s). Station locked.", currentY, targetAlt, horizontalSpeed)
+end
+
 function FlightManager.updateCruise(dt, cruiseTargetVerticalSpeed, cruiseMaxTilt, isHoverMode, isFlatDeck)
 	if isHoverMode then
-		FlightManager.state = "HOVER"
-		FlightManager.status_msg = "Hover switch ON: Holding station."
+		FlightManager.state = "FREEZED"
+		FlightManager.status_msg = "Hover switch ON: Holding station in FREEZED."
+		FlightManager.cruise_locked_throttle = nil
 		return
 	end
 	if not NavSystem.is_target_loaded then
 		FlightManager.state = "HOVER"
 		FlightManager.status_msg = "Compass removed: Leveling vectors to hover."
+		FlightManager.cruise_locked_throttle = nil
 		return
-	end
-
-	if isFlatDeck then
-		Hardware.setGyroStiffness(0, 0)
-	else
-		Hardware.setGyroStiffness(15, 15)
 	end
 
 	local deltaX = NavSystem.target_local_x or 0
 	local deltaZ = NavSystem.target_local_z or 0
 	local targetDistance = math.sqrt(deltaX * deltaX + deltaZ * deltaZ)
+
+	local currentVx = NavSystem.vel.x or 0
+	local currentVz = NavSystem.vel.z or 0
+	local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
+	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+
+	if targetDistance <= brakingDistance then
+		FlightManager.state = "APPROACH"
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.cruise_locked_throttle = nil
+		FlightManager.pid_vel_x:reset()
+		FlightManager.pid_vel_z:reset()
+		FlightManager.status_msg = string.format("Deceleration zone reached (Dist: %.1fm <= SBrake: %.1fm). Engaging soft approach.", targetDistance, brakingDistance)
+		return
+	end
+
+	local currentY = NavSystem.pos.y or 0
+	local targetAlt = FlightManager.target_alt or currentY
+	local errorAltitude = targetAlt - currentY
+
+	local isAdjustingCruiseAlt = math.abs(errorAltitude) > 3.0
+
+	if isAdjustingCruiseAlt then
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.cruise_locked_throttle = nil
+		local computedThrottle, currentVy = FlightManager.computeThrottle(cruiseTargetVerticalSpeed, dt, 1.0, errorAltitude > 0)
+		Hardware.applyThrottle(computedThrottle, dt, false)
+		FlightManager.status_msg = string.format("CRUISE ALT ADJUST: Y=%.1f->%.0fm (Vy=%.1f m/s). Coasting on inertia.", currentY, targetAlt, currentVy)
+		return
+	end
+
+	if isFlatDeck then
+		Hardware.setGyroStiffness(15, 15)
+	else
+		Hardware.setGyroStiffness(0, 0)
+	end
 
 	local directionX = (targetDistance > 0.05) and (deltaX / targetDistance) or 0.0
 	local directionZ = (targetDistance > 0.05) and (deltaZ / targetDistance) or 0.0
@@ -2350,37 +2545,38 @@ function FlightManager.updateCruise(dt, cruiseTargetVerticalSpeed, cruiseMaxTilt
 
 	local totalTilt, normalY = Hardware.setTiltVector(tiltX, tiltZ, activeMaxTilt, dt)
 
-	local computedThrottle, _ = FlightManager.computeThrottle(cruiseTargetVerticalSpeed, dt, normalY, false)
-	Hardware.applyThrottle(computedThrottle, dt, false)
-
-	local currentVx = NavSystem.vel.x or 0
-	local currentVz = NavSystem.vel.z or 0
-	local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
-	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
-
-	if targetDistance <= brakingDistance then
-		FlightManager.state = "APPROACH"
-		FlightManager.status_msg = string.format("Deceleration zone reached (Dist: %.1fm <= SBrake: %.1fm). Engaging soft approach.", targetDistance, brakingDistance)
-		FlightManager.pid_vel_x:reset()
-		FlightManager.pid_vel_z:reset()
-	else
-		FlightManager.status_msg = string.format("CRUISE (Dist: %.1fm, Tilt: %.1f*, Spd: %.1fm/s, SBrake: %.0fm)", targetDistance, totalTilt, horizontalSpeed, brakingDistance)
+	FlightManager.cruise_calib_timer = (FlightManager.cruise_calib_timer or 0) + dt
+	if not FlightManager.cruise_locked_throttle then
+		local compThrot, _ = FlightManager.computeThrottle(cruiseTargetVerticalSpeed, dt, normalY, false)
+		if FlightManager.cruise_calib_timer >= 2.0 and math.abs(NavSystem.vel.y or 0) < 0.25 then
+			FlightManager.cruise_locked_throttle = compThrot
+		else
+			Hardware.applyThrottle(compThrot, dt, false)
+		end
 	end
+	if FlightManager.cruise_locked_throttle then
+		Hardware.applyThrottle(FlightManager.cruise_locked_throttle, dt, false)
+	end
+
+	FlightManager.status_msg = string.format("CRUISE (Dist: %.1fm, Tilt: %.1f*, Spd: %.1fm/s, SBrake: %.0fm)", targetDistance, totalTilt, horizontalSpeed, brakingDistance)
 end
 
 function FlightManager.updateApproach(dt, cruiseTargetVerticalSpeed, isHoverMode, isLandingMode)
 	if isHoverMode then
-		FlightManager.state = "HOVER"
-		FlightManager.status_msg = "Hover switch ON: Holding station."
+		FlightManager.state = "FREEZED"
+		FlightManager.status_msg = "Hover switch ON: Holding station in FREEZED."
 		return
 	end
 	if not NavSystem.is_target_loaded then
 		FlightManager.state = "HOVER"
-		FlightManager.status_msg = "Compass removed: Holding hover."
+		FlightManager.status_msg = "No target: Holding hover."
 		return
 	end
 
 	Hardware.setGyroStiffness(15, 15)
+
+	local computedThrottle, currentVy = FlightManager.computeThrottle(cruiseTargetVerticalSpeed or 0.0, dt, 1.0, false)
+	Hardware.applyThrottle(computedThrottle, dt, false)
 
 	local deltaX = NavSystem.target_local_x or 0
 	local deltaZ = NavSystem.target_local_z or 0
@@ -2390,68 +2586,77 @@ function FlightManager.updateApproach(dt, cruiseTargetVerticalSpeed, isHoverMode
 	local currentVz = NavSystem.vel.z or 0
 	local horizontalSpeed = math.sqrt(currentVx * currentVx + currentVz * currentVz)
 
-	local currentPitch = NavSystem.attitude.pitch or 0
-	local currentRoll = NavSystem.attitude.roll or 0
+	local dirX = (targetDistance > 0.05) and (deltaX / targetDistance) or 0.0
+	local dirZ = (targetDistance > 0.05) and (deltaZ / targetDistance) or 0.0
 
-	local directionX = (targetDistance > 0.05) and (deltaX / targetDistance) or 0.0
-	local directionZ = (targetDistance > 0.05) and (deltaZ / targetDistance) or 0.0
-
-	local brakeAccel = CONFIG.LIMITS.BRAKE_ACCEL or 0.80
-	local distToStop = targetDistance
-	local targetSpeed = math.min(8.0, math.sqrt(2.0 * brakeAccel * distToStop))
-
-	local targetVelocityX = directionX * targetSpeed
-	local targetVelocityZ = directionZ * targetSpeed
-	local errorVelocityX = targetVelocityX - currentVx
-	local errorVelocityZ = targetVelocityZ - currentVz
-
-	local approachMaxTilt = (targetDistance < 8.0) and (CONFIG.LIMITS.APPROACH_TERMINAL_TILT or 3.5)
-		or ((targetDistance < 25.0) and (CONFIG.LIMITS.APPROACH_MAX_TILT or 6.0) or 8.0)
-	local tiltX = MathUtil.clamp(errorVelocityX * 1.5, -approachMaxTilt, approachMaxTilt)
-	local tiltZ = MathUtil.clamp(errorVelocityZ * 1.5, -approachMaxTilt, approachMaxTilt)
-	local totalTilt, normalY = Hardware.setTiltVector(tiltX, tiltZ, approachMaxTilt, dt)
-
-	local approachThrottleCap = CONFIG.LIMITS.APPROACH_THROTTLE_CAP or 0.22
-	local computedThrottle, _ = FlightManager.computeThrottle(cruiseTargetVerticalSpeed, dt, normalY, false, approachThrottleCap)
-	Hardware.applyThrottle(computedThrottle, dt, false)
-
-	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+	local vForward = currentVx * dirX + currentVz * dirZ
+	local vLateral = currentVx * (-dirZ) + currentVz * dirX
 
 	local isLandingRequested = isLandingMode or (FlightManager.manual_landing == true)
 
-	local isStationary = FlightManager.isStationary(0.12)
-	local restingTilt = math.max(math.abs(currentPitch), math.abs(currentRoll))
-	local isWalkableAttitude = restingTilt <= (CONFIG.LIMITS.MAX_RESTING_TILT or 25.0)
+	if targetDistance <= 4.0 then
+		if horizontalSpeed <= 0.18 then
+			FlightManager.pid_vel_x:reset()
+			FlightManager.pid_vel_z:reset()
+			FlightManager.waypoint_reached = true
+			Hardware.setVectorSoft(0, 1, 0, dt)
 
-	if isLandingRequested and isStationary and isWalkableAttitude then
-		if FlightManager.processTouchdown(dt, true, restingTilt, NavSystem.getTargetKey(), targetDistance) then
+			if isLandingRequested and not FlightManager.landing_aborted then
+				FlightManager.state = "LANDING"
+				FlightManager.touchdown_timer = 0.0
+				FlightManager.landing_time_in_state = 0.0
+				FlightManager.landing_start_y = NavSystem.pos.y
+				FlightManager.landing_has_descended = false
+				FlightManager.landing_retry_count = 0
+				FlightManager.status_msg = "Arrived at pad: Commencing descent to land."
+			else
+				FlightManager.state = "HOVER"
+				FlightManager.status_msg = "Arrived at target: Station locked in HOVER."
+			end
+			return
+		else
+			local brakeTiltX = MathUtil.clamp(-currentVx * 2.0, -1.2, 1.2)
+			local brakeTiltZ = MathUtil.clamp(-currentVz * 2.0, -1.2, 1.2)
+			Hardware.setTiltVector(brakeTiltX, brakeTiltZ, 1.2, dt)
+			FlightManager.status_msg = string.format("APPROACH DOCK (Dist:%.1fm, Spd:%.2fm/s). Braking to settle.", targetDistance, horizontalSpeed)
 			return
 		end
 	end
 
-	if targetDistance <= 4.0 and horizontalSpeed < 2.0 then
-		FlightManager.pid_vel_x:reset()
-		FlightManager.pid_vel_z:reset()
-		FlightManager.waypoint_reached = true
-		if isLandingRequested and not FlightManager.landing_aborted then
-			FlightManager.state = "LANDING"
-			FlightManager.baseline_pitch = currentPitch
-			FlightManager.baseline_roll = currentRoll
-			FlightManager.touchdown_timer = 0.0
-			FlightManager.landing_time_in_state = 0.0
-			FlightManager.landing_start_y = NavSystem.pos.y
-			FlightManager.landing_has_descended = false
-			FlightManager.status_msg = "Arrived at pad: Commencing descent to land."
-		else
-			FlightManager.state = "HOVER"
-			FlightManager.status_msg = "Waypoint reached. Holding stationary hover."
-		end
-		return
-	elseif targetDistance > math.max(CONFIG.LIMITS.APPROACH_MIN_DISTANCE or 65.0, brakingDistance * 1.5) then
+	local desiredSpeed = 0.20
+	if targetDistance > 30.0 then
+		desiredSpeed = 1.5
+	elseif targetDistance > 15.0 then
+		desiredSpeed = 1.0
+	elseif targetDistance > 6.0 then
+		desiredSpeed = 0.5
+	end
+
+	local speedError = desiredSpeed - vForward
+	local steerTilt = 0.0
+	if speedError >= 0 then
+		steerTilt = MathUtil.clamp(speedError * 1.5, 0.0, 1.8)
+	else
+		steerTilt = MathUtil.clamp(speedError * 2.0, -2.5, 0.0)
+	end
+
+	local lateralTilt = 0.0
+	if math.abs(vLateral) > 0.05 then
+		lateralTilt = MathUtil.clamp(-vLateral * 1.8, -1.2, 1.2)
+	end
+
+	local tiltX = dirX * steerTilt + (-dirZ) * lateralTilt
+	local tiltZ = dirZ * steerTilt + (dirX) * lateralTilt
+
+	local maxTiltLimit = (targetDistance > 20.0) and 2.5 or 1.5
+	local totalTilt, _ = Hardware.setTiltVector(tiltX, tiltZ, maxTiltLimit, dt)
+
+	local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+	if targetDistance > math.max(CONFIG.LIMITS.APPROACH_MIN_DISTANCE or 45.0, brakingDistance * 1.5) then
 		FlightManager.state = "CRUISE"
 		FlightManager.status_msg = string.format("Far from target (Dist: %.1fm). Engaging cruise.", targetDistance)
 	else
-		FlightManager.status_msg = string.format("APPROACH (Dist:%.1fm, Spd:%.1f/%.1fm/s, Tilt:%.1f*)", targetDistance, horizontalSpeed, targetSpeed, totalTilt)
+		FlightManager.status_msg = string.format("APPROACH (Dist:%.1fm, Spd:%.2f/%.2fm/s, Tilt:%.1f*, Vy:%.1f)", targetDistance, vForward, desiredSpeed, totalTilt, currentVy)
 	end
 end
 
@@ -2518,7 +2723,9 @@ function FlightManager.updateHover(dt, cruiseTargetVerticalSpeed, effectiveTarge
 	end
 
 	if isHoverMode then
-		FlightManager.status_msg = string.format("HOVER SWITCH ENGAGED (Y:%.1f, Alt:%.0fm). Holding station.", currentY, effectiveTargetAlt)
+		FlightManager.state = "FREEZED"
+		FlightManager.status_msg = string.format("FREEZED (Y:%.1f, Alt:%.0fm). Holding station.", currentY, effectiveTargetAlt)
+		return
 	elseif not NavSystem.is_target_loaded then
 		FlightManager.status_msg = string.format("HOVER (Y:%.1f, Alt:%.0fm). Holding altitude. Enter target.", currentY, effectiveTargetAlt)
 	end
@@ -2533,59 +2740,44 @@ function FlightManager.updateHover(dt, cruiseTargetVerticalSpeed, effectiveTarge
 	end
 
 	if isLandingRequested and not FlightManager.landing_aborted then
-		if targetDistance <= 4.0 then
-			FlightManager.hover_stable_timer = (FlightManager.hover_stable_timer or 0) + dt
-			if FlightManager.hover_stable_timer >= 0.5 then
-				FlightManager.state = "LANDING"
-				FlightManager.baseline_pitch = currentPitch
-				FlightManager.baseline_roll = currentRoll
-				FlightManager.touchdown_timer = 0.0
-				FlightManager.landing_time_in_state = 0.0
-				FlightManager.landing_start_y = NavSystem.pos.y
-				FlightManager.landing_has_descended = false
-				FlightManager.status_msg = isLandingMode and "Landing switch ON: Commencing descent to pad." or "Landing engaged: Commencing descent to pad."
-				FlightManager.pid_vel_x:reset()
-				FlightManager.pid_vel_z:reset()
-				FlightManager.hover_stable_timer = nil
-				return
-			end
-		else
-			FlightManager.hover_stable_timer = nil
-			local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
-			if targetDistance <= math.max(CONFIG.LIMITS.APPROACH_MIN_DISTANCE or 65.0, brakingDistance) then
-				FlightManager.state = "APPROACH"
-				FlightManager.status_msg = "Landing active: Navigating approach to pad."
-				FlightManager.pid_vel_x:reset()
-				FlightManager.pid_vel_z:reset()
-			else
-				FlightManager.state = "CRUISE"
-				FlightManager.status_msg = string.format("Landing active: Cruising to pad (%s)", NavSystem.target_source)
-			end
+		if targetDistance <= 6.0 and horizontalSpeed <= 0.35 then
+			FlightManager.state = "LANDING"
+			FlightManager.touchdown_timer = 0.0
+			FlightManager.landing_time_in_state = 0.0
+			FlightManager.landing_start_y = NavSystem.pos.y
+			FlightManager.landing_has_descended = false
+			FlightManager.landing_retry_count = 0
+			FlightManager.status_msg = isLandingMode and "Landing switch ON: Commencing descent to pad." or "Landing engaged: Commencing descent to pad."
+			FlightManager.pid_vel_x:reset()
+			FlightManager.pid_vel_z:reset()
+			return
+		elseif targetDistance > 6.0 then
+			FlightManager.state = "APPROACH"
+			FlightManager.status_msg = "Landing active: Navigating approach to pad."
+			FlightManager.pid_vel_x:reset()
+			FlightManager.pid_vel_z:reset()
 			return
 		end
 	else
-		FlightManager.hover_stable_timer = nil
-		local needsAltitudeClimb = (effectiveTargetAlt > (currentY + 5.0))
-		local hasClearance = FlightManager.is_airborne or ((not needsAltitudeClimb) and (currentY >= (startY + 3.0)))
 		local hasDistantTarget = (not isHoverMode) and NavSystem.is_target_loaded and (targetDistance > (hoverRadius + 1.0)) and not FlightManager.divergence_alarm
-
 		if hasDistantTarget then
-			if hasClearance then
-				local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
-				if targetDistance <= brakingDistance then
-					FlightManager.state = "APPROACH"
-					FlightManager.status_msg = "Safe altitude reached: Transitioning to approach."
-					FlightManager.pid_vel_x:reset()
-					FlightManager.pid_vel_z:reset()
-				else
-					FlightManager.state = "CRUISE"
-					FlightManager.status_msg = string.format("Safe altitude reached: Cruising to target (%s)", NavSystem.target_source)
-				end
-				return
-			else
-				FlightManager.status_msg = string.format("CLIMB TO CRUISE: Y=%.1f/%.0fm (need +%.1fm) Vy=%.1f m/s", currentY, effectiveTargetAlt, effectiveTargetAlt - currentY, NavSystem.vel.y or 0)
+			if errorAltitude > 3.0 then
+				FlightManager.state = "CLIMB"
+				Hardware.clearVector()
+				Hardware.setGyroStiffness(15, 15)
+				FlightManager.status_msg = string.format("CLIMB to target altitude (Y:%.1f -> %.0fm). Pure vertical ascent.", currentY, effectiveTargetAlt)
 				return
 			end
+			local brakingDistance = MathUtil.computeBrakingDistance(horizontalSpeed)
+			if targetDistance <= brakingDistance then
+				FlightManager.state = "APPROACH"
+				FlightManager.pid_vel_x:reset()
+				FlightManager.pid_vel_z:reset()
+				FlightManager.status_msg = "Target in approach range. Entering APPROACH."
+			else
+				FlightManager.planToTarget()
+			end
+			return
 		end
 	end
 
@@ -2617,17 +2809,20 @@ function FlightManager.updateLanding(dt, isLandingMode, isHoverMode)
 	local deltaZ = NavSystem.target_local_z or 0
 	local targetDistance = math.sqrt(deltaX * deltaX + deltaZ * deltaZ)
 
-	if NavSystem.is_target_loaded and (targetDistance > 8.0) then
+	if NavSystem.is_target_loaded and (targetDistance > 6.0) then
 		FlightManager.state = "APPROACH"
 		FlightManager.landing_has_descended = false
 		FlightManager.touchdown_timer = 0.0
-		FlightManager.status_msg = string.format("OFF-PAD DISPLACEMENT (Dist: %.1fm > 8m)! Re-approaching pad.", targetDistance)
+		FlightManager.status_msg = string.format("OFF-PAD DISPLACEMENT (Dist: %.1fm > 6m)! Re-approaching pad.", targetDistance)
 		return
 	end
 
 	local heightRemaining = math.max(0.0, (NavSystem.pos.y or 64.0) - targetLandingAltitude)
 
 	Hardware.setGyroStiffness(15, 15)
+	Hardware.setVectorSoft(0, 1, 0, dt)
+	FlightManager.pid_vel_x:reset()
+	FlightManager.pid_vel_z:reset()
 
 	local currentPitch = NavSystem.attitude.pitch or 0
 	local currentRoll = NavSystem.attitude.roll or 0
@@ -2647,6 +2842,30 @@ function FlightManager.updateLanding(dt, isLandingMode, isHoverMode)
 	local maxRestingTilt = CONFIG.LIMITS.MAX_RESTING_TILT or 25.0
 	local isWalkableAttitude = restingTilt <= maxRestingTilt
 
+	local maxSafeLandingTilt = 12.0
+	if restingTilt > maxSafeLandingTilt then
+		local lastTilt = FlightManager.last_landing_tilt or restingTilt
+		FlightManager.last_landing_tilt = restingTilt
+		if restingTilt > (lastTilt + 0.8) then
+			FlightManager.landing_retry_count = (FlightManager.landing_retry_count or 0) + 1
+			FlightManager.override_hover_alt = NavSystem.pos.y + 4.0
+			FlightManager.landing_has_descended = false
+			FlightManager.touchdown_timer = 0.0
+			if FlightManager.landing_retry_count <= 2 then
+				FlightManager.state = "HOVER"
+				FlightManager.status_msg = string.format("STEEP TILT INCREASING (%.1f*): Climb +4m, retry landing (%d/2).", restingTilt, FlightManager.landing_retry_count)
+			else
+				FlightManager.state = "HOVER"
+				FlightManager.landing_aborted = true
+				FlightManager.manual_landing = false
+				FlightManager.status_msg = string.format("LANDING ABORTED: Ground slope too steep (%.1f*). Holding safe HOVER.", restingTilt)
+			end
+			return
+		end
+	else
+		FlightManager.last_landing_tilt = restingTilt
+	end
+
 	if FlightManager.landing_has_descended and isStationary and isWalkableAttitude then
 		if FlightManager.processTouchdown(dt, true, restingTilt, targetKey, targetDistance) then
 			FlightManager.manual_landing = false
@@ -2654,25 +2873,6 @@ function FlightManager.updateLanding(dt, isLandingMode, isHoverMode)
 		end
 	else
 		FlightManager.touchdown_timer = 0.0
-	end
-
-	local velocityX = NavSystem.vel.x or 0
-	local velocityZ = NavSystem.vel.z or 0
-	local horizontalSpeed = math.sqrt(velocityX * velocityX + velocityZ * velocityZ)
-
-	local positionGain = (targetDistance > 1.2) and 0.25 or 0.0
-	local dampingGain = 1.40
-	local tiltX = MathUtil.clamp(deltaX * positionGain - velocityX * dampingGain, -1.8, 1.8)
-	local tiltZ = MathUtil.clamp(deltaZ * positionGain - velocityZ * dampingGain, -1.8, 1.8)
-
-	if (targetDistance < 1.0 or not NavSystem.is_target_loaded) and horizontalSpeed < 0.10 then
-		tiltX = 0
-		tiltZ = 0
-		Hardware.setVectorSoft(0, 1, 0, dt)
-		FlightManager.pid_vel_x:reset()
-		FlightManager.pid_vel_z:reset()
-	else
-		Hardware.setTiltVector(tiltX, tiltZ, 1.8, dt)
 	end
 
 	local descentVerticalSpeed = -0.75
@@ -2820,6 +3020,9 @@ function FlightManager.update(dt)
 	if targetJustChanged then
 		FlightManager.override_hover_alt = nil
 		FlightManager.waypoint_reached = false
+		if FlightManager.state ~= "PARKED" and FlightManager.state ~= "MANUAL" then
+			FlightManager.planToTarget()
+		end
 	end
 
 	local isStalled = false
@@ -2868,13 +3071,8 @@ function FlightManager.update(dt)
 				if not Hardware.typewriter_keys[keyCode] then
 					if keyCode == 77 or keyCode == 109 then
 						if FlightManager.state == "MANUAL" then
-							if NavSystem.is_target_loaded then
-								FlightManager.state = "CRUISE"
-								FlightManager.status_msg = "Typewriter: Autopilot resumed."
-							else
-								FlightManager.state = "HOVER"
-								FlightManager.status_msg = "Typewriter: Hover lock engaged."
-							end
+							FlightManager.planToTarget()
+							FlightManager.status_msg = "Typewriter: Autopilot resumed."
 						else
 							FlightManager.prev_state = FlightManager.state
 							FlightManager.state = "MANUAL"
@@ -2903,7 +3101,7 @@ function FlightManager.update(dt)
 						FlightManager.status_msg = "Typewriter: Landing sequence engaged [L]"
 					elseif keyCode == 259 or keyCode == 8 then
 						FlightManager.manual_landing = false
-						FlightManager.state = "IDLE"
+						FlightManager.state = "PARKED"
 						FlightManager.status_msg = "Typewriter: Emergency engine cutoff [Backspace]"
 						Hardware.applyThrottle(0, dt, true)
 						Hardware.clearVector()
@@ -2942,7 +3140,7 @@ function FlightManager.update(dt)
 	local isAltHeld = (Hardware.active_keys[342] or Hardware.active_keys[346]
 	                   or Hardware.active_keys[56] or Hardware.active_keys[184]) and true or false
 	local isReverseActive = isAltHeld
-	if FlightManager.state == "IDLE" then
+	if FlightManager.state == "PARKED" then
 		isReverseActive = false
 	end
 	Hardware.setInversion(isReverseActive)
@@ -2950,7 +3148,7 @@ function FlightManager.update(dt)
 	local pitchTilt = math.abs(NavSystem.attitude.pitch or 0)
 	local rollTilt = math.abs(NavSystem.attitude.roll or 0)
 	local maxAttitudeTilt = math.max(pitchTilt, rollTilt)
-	if maxAttitudeTilt > 55.0 and FlightManager.state ~= "IDLE" then
+	if maxAttitudeTilt > 55.0 and FlightManager.state ~= "PARKED" then
 		Hardware.setGyroStiffness(0, 0)
 		Hardware.clearVector()
 		if not isReverseActive then
@@ -2971,7 +3169,7 @@ function FlightManager.update(dt)
 	local isLandingRequested = isLandingMode or (FlightManager.manual_landing == true)
 
 	local effectiveTargetAlt = FlightManager.override_hover_alt or altFloorSetting
-	if not FlightManager.is_airborne and (FlightManager.state == "HOVER" or FlightManager.state == "CRUISE") then
+	if not FlightManager.is_airborne and (FlightManager.state == "HOVER" or FlightManager.state == "CRUISE" or FlightManager.state == "CLIMB") then
 		local minLiftoffAlt = (FlightManager.liftoff_start_y or NavSystem.pos.y) + 5.0
 		effectiveTargetAlt = math.max(effectiveTargetAlt, minLiftoffAlt)
 	end
@@ -3069,8 +3267,24 @@ function FlightManager.update(dt)
 		FlightManager.last_dist_sample = nil
 	end
 
-	if FlightManager.state == "IDLE" then
-		FlightManager.updateIdle(dt, effectiveTargetAlt, isLandingMode, isHoverMode, targetJustChanged)
+	if isHoverMode and FlightManager.state ~= "PARKED" and FlightManager.state ~= "MANUAL" and FlightManager.state ~= "FREEZED" then
+		FlightManager.state = "FREEZED"
+		FlightManager.target_alt = NavSystem.pos.y
+		FlightManager.pid_vel_x:reset()
+		FlightManager.pid_vel_z:reset()
+		Hardware.clearVector()
+		Hardware.setGyroStiffness(15, 15)
+		FlightManager.status_msg = string.format("Hover switch ON: Station locked in FREEZED at Y=%.1f.", NavSystem.pos.y)
+	end
+
+	if FlightManager.state == "PARKED" then
+		FlightManager.updateParked(dt, effectiveTargetAlt, isLandingMode, isHoverMode, targetJustChanged)
+
+	elseif FlightManager.state == "CLIMB" then
+		FlightManager.updateClimb(dt, effectiveTargetAlt, cruiseTargetVerticalSpeed, isLandingMode, isHoverMode)
+
+	elseif FlightManager.state == "FREEZED" then
+		FlightManager.updateFreezed(dt, isHoverMode)
 
 	elseif FlightManager.state == "CRUISE" then
 		FlightManager.updateCruise(dt, cruiseTargetVerticalSpeed, cruiseMaxTilt, isHoverMode, isFlatDeck)
@@ -3224,7 +3438,7 @@ local function renderNixieTube()
 		return
 	end
 
-	local currentState = FlightManager.state or "IDLE"
+	local currentState = FlightManager.state or "PARKED"
 
 	if currentState == "MANUAL" then
 		local currentVx = NavSystem.vel.x or 0
@@ -3265,7 +3479,7 @@ local function renderNixieTube()
 		return string.format("%dM", currentY)
 	end
 
-	if not NavSystem.is_target_loaded and currentState == "IDLE" then
+	if not NavSystem.is_target_loaded and currentState == "PARKED" then
 		if Hardware.last_nixie_text ~= "" then
 			Hardware.last_nixie_text = ""
 			pcall(Hardware.nixie_tube.setText, "")
@@ -3288,8 +3502,16 @@ local function renderNixieTube()
 			textToDisplay = formatAltProgression(currentY, knownPadY, width)
 		end
 
-	elseif currentState == "IDLE" then
+	elseif currentState == "PARKED" then
 		textToDisplay = "PARKED"
+
+	elseif currentState == "FREEZED" then
+		textToDisplay = "FREEZED"
+
+	elseif currentState == "CLIMB" then
+		local currentY = NavSystem.pos.y or 0
+		local targetY = FlightManager.target_alt
+		textToDisplay = formatAltProgression(currentY, targetY, width)
 
 	elseif currentState == "HOVER" then
 		local currentY = NavSystem.pos.y or 0
@@ -3468,8 +3690,8 @@ local function main()
 			elseif keyCode == keys.m then
 				if not Security.is_locked then
 					if FlightManager.state == "MANUAL" then
-						FlightManager.state = NavSystem.is_target_loaded and "CRUISE" or "HOVER"
-						FlightManager.status_msg = "Manual mode disengaged."
+						FlightManager.planToTarget()
+						FlightManager.status_msg = "Manual mode disengaged: Autopilot resumed."
 					else
 						FlightManager.prev_state = FlightManager.state
 						FlightManager.state = "MANUAL"
@@ -3499,7 +3721,7 @@ local function main()
 			elseif keyCode == keys.backspace then
 				if not Security.is_locked then
 					FlightManager.manual_landing = false
-					FlightManager.state = "IDLE"
+					FlightManager.state = "PARKED"
 					FlightManager.status_msg = "Emergency engine cutoff [Backspace]"
 					Hardware.applyThrottle(0, CONFIG.TICK_RATE, true)
 					Hardware.clearVector()
